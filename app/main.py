@@ -59,20 +59,22 @@ def _load_image_bytes(image_bytes: bytes) -> Image.Image:
         raise HTTPException(status_code=400, detail="Imagen inválida") from exc
 
 
-def _rotate_90(img: Image.Image) -> Image.Image:
-    # Rotación fija 90 grados (PIL: sentido antihorario)
-    return img.rotate(90, expand=True)
+def _rotate_image(img: Image.Image, degrees: int) -> Image.Image:
+    """Rota la imagen los grados especificados (sentido antihorario)."""
+    if degrees == 0:
+        return img
+    return img.rotate(degrees, expand=True)
 
 
 # Inicializa una sola vez; la primera carga puede tardar y descargar modelos.
 _READER = easyocr.Reader(["es", "en"], gpu=False)
 
+# Threshold minimo de confianza para aceptar resultado
+_CONFIDENCE_THRESHOLD = 0.7
 
-async def _process_ocr(image_bytes: bytes) -> dict[str, Any]:
-    """Procesa la imagen y retorna el resultado OCR."""
-    img = _load_image_bytes(image_bytes)
-    img = _rotate_90(img)
 
+def _run_ocr_on_image(img: Image.Image) -> tuple[list[dict[str, Any]], float]:
+    """Ejecuta OCR y devuelve (lines, avg_confidence)."""
     img_np = np.array(img)
     results = _READER.readtext(img_np)
 
@@ -86,16 +88,56 @@ async def _process_ocr(image_bytes: bytes) -> dict[str, Any]:
             }
         )
 
-    full_text = "\n".join([line["text"] for line in lines]).strip()
     avg_confidence = (
         float(sum(line["confidence"] for line in lines) / len(lines)) if lines else 0.0
     )
+    return lines, avg_confidence
 
-    return {
-        "full_text": full_text,
-        "avg_confidence": avg_confidence,
-        "lines": lines,
-        "rotated_degrees": 90,
+
+async def _process_ocr(image_bytes: bytes) -> dict[str, Any]:
+    """Procesa la imagen probando rotaciones hasta obtener confianza >= 0.7."""
+    img = _load_image_bytes(image_bytes)
+
+    rotations = [0, 90, 180, 270]
+    best_result: dict[str, Any] | None = None
+    best_confidence = 0.0
+
+    for degrees in rotations:
+        rotated_img = _rotate_image(img, degrees)
+        lines, avg_confidence = _run_ocr_on_image(rotated_img)
+
+        # Si supera el threshold, usar este resultado
+        if avg_confidence >= _CONFIDENCE_THRESHOLD:
+            return {
+                "full_text": "\n".join([line["text"] for line in lines]).strip(),
+                "avg_confidence": avg_confidence,
+                "lines": lines,
+                "rotated_degrees": degrees,
+                "low_confidence": False,
+                "languages": ["es", "en"],
+                "gpu": False,
+            }
+
+        # Guardar el mejor resultado por si ninguno supera el threshold
+        if avg_confidence > best_confidence:
+            best_confidence = avg_confidence
+            best_result = {
+                "full_text": "\n".join([line["text"] for line in lines]).strip(),
+                "avg_confidence": avg_confidence,
+                "lines": lines,
+                "rotated_degrees": degrees,
+                "low_confidence": True,
+                "languages": ["es", "en"],
+                "gpu": False,
+            }
+
+    # Ninguna rotacion supero el threshold, devolver la mejor con flag
+    return best_result or {
+        "full_text": "",
+        "avg_confidence": 0.0,
+        "lines": [],
+        "rotated_degrees": 0,
+        "low_confidence": True,
         "languages": ["es", "en"],
         "gpu": False,
     }

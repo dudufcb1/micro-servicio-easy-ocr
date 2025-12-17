@@ -4,7 +4,7 @@ from typing import Any
 
 import easyocr
 import numpy as np
-from fastapi import Body, Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 from PIL import Image
 from io import BytesIO
@@ -68,29 +68,8 @@ def _rotate_90(img: Image.Image) -> Image.Image:
 _READER = easyocr.Reader(["es", "en"], gpu=False)
 
 
-@app.post("/ocr")
-async def ocr(
-    _: None = Depends(require_auth),
-    file: UploadFile | None = File(default=None),
-    payload: OCRBase64Request | None = Body(default=None),
-) -> dict[str, Any]:
-    if file is None and payload is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Debes enviar multipart con 'file' o JSON con 'image_base64'",
-        )
-
-    if file is not None and payload is not None:
-        raise HTTPException(
-            status_code=400,
-            detail="Envía solo uno: multipart 'file' o JSON 'image_base64'",
-        )
-
-    if file is not None:
-        image_bytes = await file.read()
-    else:
-        image_bytes = _decode_base64_image(payload.image_base64)
-
+async def _process_ocr(image_bytes: bytes) -> dict[str, Any]:
+    """Procesa la imagen y retorna el resultado OCR."""
     img = _load_image_bytes(image_bytes)
     img = _rotate_90(img)
 
@@ -120,3 +99,23 @@ async def ocr(
         "languages": ["es", "en"],
         "gpu": False,
     }
+
+
+@app.post("/ocr")
+async def ocr_json(
+    payload: OCRBase64Request,
+    _: None = Depends(require_auth),
+) -> dict[str, Any]:
+    """OCR via JSON con image_base64."""
+    image_bytes = _decode_base64_image(payload.image_base64)
+    return await _process_ocr(image_bytes)
+
+
+@app.post("/ocr/upload")
+async def ocr_upload(
+    _: None = Depends(require_auth),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """OCR via multipart file upload."""
+    image_bytes = await file.read()
+    return await _process_ocr(image_bytes)

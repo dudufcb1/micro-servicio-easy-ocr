@@ -50,10 +50,12 @@ def api_token(monkeypatch: pytest.MonkeyPatch) -> str:
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__auth_missing_headers__401(app_main, api_token: str) -> None:
+async def test_post_ocr_json__auth_missing_headers__401(
+    app_main, api_token: str
+) -> None:
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post("/ocr")
+        resp = await client.post("/ocr", json={"image_base64": ""})
 
     assert resp.status_code == 401
     body = resp.json()
@@ -62,7 +64,28 @@ async def test_post_ocr__auth_missing_headers__401(app_main, api_token: str) -> 
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__auth_valid_x_api_token__200(app_main, api_token: str) -> None:
+async def test_post_ocr_upload__auth_missing_headers__401(
+    app_main, api_token: str
+) -> None:
+    img_bytes = _make_png_bytes()
+
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/ocr/upload",
+            files={"file": ("img.png", img_bytes, "image/png")},
+        )
+
+    assert resp.status_code == 401
+    body = resp.json()
+    assert type(body) is dict
+    assert body == {"detail": "Unauthorized"}
+
+
+@pytest.mark.asyncio
+async def test_post_ocr_upload__auth_valid_x_api_token__200_empty_results(
+    app_main, api_token: str
+) -> None:
     # Return empty OCR results for deterministic output.
     app_main._READER.set_readtext_return([])
 
@@ -71,7 +94,7 @@ async def test_post_ocr__auth_valid_x_api_token__200(app_main, api_token: str) -
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
-            "/ocr",
+            "/ocr/upload",
             headers={"X-API-Token": api_token},
             files={"file": ("img.png", img_bytes, "image/png")},
         )
@@ -109,7 +132,7 @@ async def test_post_ocr__auth_valid_x_api_token__200(app_main, api_token: str) -
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__auth_valid_bearer_token_case_insensitive__200(
+async def test_post_ocr_upload__auth_valid_bearer_token_case_insensitive__200(
     app_main, api_token: str
 ) -> None:
     app_main._READER.set_readtext_return([])
@@ -119,7 +142,7 @@ async def test_post_ocr__auth_valid_bearer_token_case_insensitive__200(
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
-            "/ocr",
+            "/ocr/upload",
             headers={"Authorization": f"bEaReR    {api_token}  "},
             files={"file": ("img.png", img_bytes, "image/png")},
         )
@@ -131,12 +154,16 @@ async def test_post_ocr__auth_valid_bearer_token_case_insensitive__200(
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__auth_invalid_token__401(app_main, api_token: str) -> None:
+async def test_post_ocr_json__auth_invalid_token__401(app_main, api_token: str) -> None:
+    img_bytes = _make_png_bytes()
+    payload = {"image_base64": base64.b64encode(img_bytes).decode("ascii")}
+
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/ocr",
-            headers={"X-API-Token": "wrong"},
+            headers={"X-API-Token": "wrong", "Content-Type": "application/json"},
+            json=payload,
         )
 
     assert resp.status_code == 401
@@ -146,24 +173,78 @@ async def test_post_ocr__auth_invalid_token__401(app_main, api_token: str) -> No
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__auth_x_api_token_takes_precedence_over_bearer__401(
+async def test_post_ocr_json__input_missing_body__422(app_main, api_token: str) -> None:
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/ocr", headers={"X-API-Token": api_token})
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert type(body) is dict
+    assert body == {
+        "detail": [
+            {"type": "missing", "loc": ["body"], "msg": "Field required", "input": None}
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_ocr_upload__input_missing_file__422(
     app_main, api_token: str
 ) -> None:
-    # Contract: provided = x_api_token or bearer, so a wrong X-API-Token must fail even if bearer is valid.
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/ocr/upload", headers={"X-API-Token": api_token})
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert type(body) is dict
+    assert body == {
+        "detail": [
+            {
+                "type": "missing",
+                "loc": ["body", "file"],
+                "msg": "Field required",
+                "input": None,
+            }
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_post_ocr_json__input_invalid_base64__400(
+    app_main, api_token: str
+) -> None:
     transport = ASGITransport(app=app_main.app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         resp = await client.post(
             "/ocr",
-            headers={
-                "X-API-Token": "wrong",
-                "Authorization": f"Bearer {api_token}",
-            },
+            headers={"X-API-Token": api_token, "Content-Type": "application/json"},
+            json={"image_base64": "not_base64!!"},
         )
 
-    assert resp.status_code == 401
+    assert resp.status_code == 400
     body = resp.json()
     assert type(body) is dict
-    assert body == {"detail": "Unauthorized"}
+    assert body == {"detail": "Base64 inválido"}
+
+
+@pytest.mark.asyncio
+async def test_post_ocr_upload__input_invalid_image_bytes__400(
+    app_main, api_token: str
+) -> None:
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/ocr/upload",
+            headers={"X-API-Token": api_token},
+            files={"file": ("img.png", b"not an image", "image/png")},
+        )
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert type(body) is dict
+    assert body == {"detail": "Imagen inválida"}
 
 
 def test__get_api_token__missing_env_raises_runtime_error(
@@ -290,55 +371,7 @@ def test__rotate_90__swaps_dimensions_and_rotates_pixels(app_main) -> None:
 
 
 @pytest.mark.asyncio
-async def test_post_ocr__input_missing_image__400(app_main, api_token: str) -> None:
-    transport = ASGITransport(app=app_main.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post("/ocr", headers={"X-API-Token": api_token})
-
-    assert resp.status_code == 400
-    body = resp.json()
-    assert type(body) is dict
-    assert body == {
-        "detail": "Debes enviar multipart con 'file' o JSON con 'image_base64'"
-    }
-
-
-@pytest.mark.asyncio
-async def test_post_ocr__input_invalid_base64__400(app_main, api_token: str) -> None:
-    transport = ASGITransport(app=app_main.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/ocr",
-            headers={"X-API-Token": api_token, "Content-Type": "application/json"},
-            json={"image_base64": "not_base64!!"},
-        )
-
-    assert resp.status_code == 400
-    body = resp.json()
-    assert type(body) is dict
-    assert body == {"detail": "Base64 inválido"}
-
-
-@pytest.mark.asyncio
-async def test_post_ocr__input_invalid_image_bytes__400(
-    app_main, api_token: str
-) -> None:
-    transport = ASGITransport(app=app_main.app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        resp = await client.post(
-            "/ocr",
-            headers={"X-API-Token": api_token},
-            files={"file": ("img.png", b"not an image", "image/png")},
-        )
-
-    assert resp.status_code == 400
-    body = resp.json()
-    assert type(body) is dict
-    assert body == {"detail": "Imagen inválida"}
-
-
-@pytest.mark.asyncio
-async def test_post_ocr__json_base64_success_and_strict_response_contract(
+async def test_post_ocr_json__success_and_strict_response_contract(
     app_main, api_token: str
 ) -> None:
     # Non-square image to assert rotation via numpy array shape.
@@ -430,22 +463,57 @@ async def test_post_ocr__json_base64_success_and_strict_response_contract(
 
 
 @pytest.mark.asyncio
-async def test_ocr_function__rejects_both_file_and_payload__400(
+async def test_post_ocr_upload__success_and_rotation_shape(
     app_main, api_token: str
 ) -> None:
-    # This branch is hard to hit via HTTP because a request can't be both JSON-body and multipart.
-    from fastapi import UploadFile
+    # Use a different non-square image to assert rotation via readtext input.
+    img_bytes = _make_png_bytes(
+        size=(4, 1)
+    )  # W=4, H=1 -> rotated PIL size (1,4) -> np shape (4,1,3)
 
+    app_main._READER.set_readtext_return([])
+
+    transport = ASGITransport(app=app_main.app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/ocr/upload",
+            headers={"X-API-Token": api_token},
+            files={"file": ("img.png", img_bytes, "image/png")},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert type(body) is dict
+    assert body["lines"] == []
+
+    assert len(app_main._READER.readtext_calls) == 1
+    img_np = app_main._READER.readtext_calls[0]
+    assert isinstance(img_np, np.ndarray)
+    assert img_np.shape == (4, 1, 3)
+
+
+@pytest.mark.asyncio
+async def test__process_ocr__unit_success_empty_results(app_main) -> None:
+    # Unit test for internal helper: strict output keys and types.
+    app_main._READER.set_readtext_return([])
     img_bytes = _make_png_bytes()
-    upload = UploadFile(filename="img.png", file=BytesIO(img_bytes))
-    payload = app_main.OCRBase64Request(
-        image_base64=base64.b64encode(img_bytes).decode("ascii")
-    )
 
-    with pytest.raises(HTTPException) as excinfo:
-        await app_main.ocr(_=None, file=upload, payload=payload)
+    out = await app_main._process_ocr(img_bytes)
 
-    exc = excinfo.value
-    assert type(exc) is HTTPException
-    assert exc.status_code == 400
-    assert exc.detail == "Envía solo uno: multipart 'file' o JSON 'image_base64'"
+    assert type(out) is dict
+    assert set(out.keys()) == {
+        "full_text",
+        "avg_confidence",
+        "lines",
+        "rotated_degrees",
+        "languages",
+        "gpu",
+    }
+    assert out == {
+        "full_text": "",
+        "avg_confidence": 0.0,
+        "lines": [],
+        "rotated_degrees": 90,
+        "languages": ["es", "en"],
+        "gpu": False,
+    }

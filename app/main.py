@@ -4,12 +4,27 @@ from typing import Any
 
 import easyocr
 import numpy as np
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from PIL import Image
 from io import BytesIO
 
 app = FastAPI(title="easy-ocr-api")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "Validation error - usa /ocr para JSON con image_base64, "
+            "o /ocr/upload para multipart file"
+        },
+    )
 
 
 class OCRBase64Request(BaseModel):
